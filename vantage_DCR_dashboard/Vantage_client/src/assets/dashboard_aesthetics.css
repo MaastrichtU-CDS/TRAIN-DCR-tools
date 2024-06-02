@@ -1,0 +1,151 @@
+@charset "UTF-8";
+html {
+    min-height: 100%;
+    margin: 0;
+}
+
+body {
+    min-height: 100%;
+    margin: 0;
+    background: whitesmoke;
+}
+
+.primary-header {
+    content: '';
+    width: 100%;
+    height: 5.35%;
+    background: #52316c;
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 1;
+}
+
+.input-field {
+    background-color: rgba(200, 200, 200, 0.25);
+    border: none;
+    border-radius: 5px;
+    padding: 10px;
+    margin-top: 0.175%;
+    margin-right: 0.5%;
+    margin-left: 0.5%;
+}
+
+.welcome-message {
+    margin-top: -0.175%;
+    margin-left: 0.5%;
+    margin-right: 0.5%;
+    font-size: 14px;
+}
+
+/* Define styles for the dashboard container */
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr); /* Adjust the number of columns as needed */
+    grid-gap: 20px;
+    height: 7%;
+    margin-top: 3%;
+    margin-right: 20%;
+    margin-left: 20%;
+    text-align: center;
+}
+
+.dashboard-title {
+    text-align: center;
+    color: #484848;
+    margin-right: 0;
+    margin-left: 22.5%;
+    font-size: 36px;
+    z-index: 2;
+    display: flex;
+    position: absolute;
+    alignment: center;
+}
+
+/* Define styles for the tile container */
+.tile {
+    background-color: #ffffff; /* Light grey background */
+    height: 10%;
+    width: 60%;
+    alignment: center;
+    text-align: center;
+    border-radius: 10px;
+    padding: 40px;
+    margin-top: 40%;
+    margin-left: auto;
+    margin-right: auto;
+    box-shadow: 0px 0px 25px rgba(0, 0, 0, 0.2); /* Shadow for depth */
+}
+
+.tile-content {
+    font-size: 20px;
+    display: flex; /* Use flexbox */
+    align-items: center; /* Vertically center the content */
+    justify-content: center; /* Horizontally center the content */
+    height: 100%; /* Ensure the content fills the tile */
+}
+
+.organisation-checklist {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 2%;
+}
+
+/* White text for the last text field */
+.white-text {
+    color: white;
+}
+
+.graph-container {
+    width: 100%;
+    margin-top: 8.5%;
+    margin-right: auto;
+    margin-left: auto;
+}
+
+.graph-content {
+    width: 100%;
+    background-color: transparent;
+}
+
+.pie-drop-down {
+    width: 30%;
+    z-index: 5;
+    background: transparent;
+    margin: inherit;
+    display: flex;
+    position: absolute;
+    alignment: center;
+}
+
+.box-plot-drop-down {
+    width: 60%;
+    z-index: 5;
+    background: transparent;
+    margin: inherit;
+    display: flex;
+    position: absolute;
+    alignment: center;
+}
+
+.authentication-lock {
+    #background-color: rgba(0, 0, 0, 0.5); /* Semi-transparent black/grey background */
+    border-radius: 10px;
+    color: #2d2c2c;
+    font-size: 18px;
+    text-align: center;
+    width: 100%;
+    height: 205%;
+    margin-top: -1.5%;
+    margin-left: auto;
+    margin-right: auto;
+    position: absolute;
+    z-index: 10;
+}
+
+.graph-shadow {
+    box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.5);
+    background-color: lightgrey;
+    margin: 5px;
+    padding: 0.5px;
+}
