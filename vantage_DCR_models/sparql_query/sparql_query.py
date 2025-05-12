@@ -1,9 +1,12 @@
 import time
+
+import numpy as np
 from vantage6.tools.util import info
 import pandas as pd
 import requests
 from io import StringIO
 import os
+
 
 codedict = {
     "C00000": "Unknown", "C48737": "Tx", "C48719": "T0", "C48720": "T1", "C48724": "T2",
@@ -14,17 +17,14 @@ codedict = {
     "C12421": "Oral cavity", "C150211": "Larynx", "C4044": "Larynx", "C20000": 1, "C30000": 0, "C40000": 1, "C50000": 0}
 
 
-def master(client, data, expl_vars, time_col, outcome_col, feature_type, organization_ids=None):
+def master(client, data, expl_vars, time_col, outcome_col, feature_type, organization_ids=None, split_data=False, split_ratio=0.7):
     """This package does the following:
             1. Fetch data using SPARQL queries
+            2. Optionally split data into train/test sets
     """
-    path = "/mnt/data/"
-    MAX_COMPLEXITY = 250000
 
     timestamp = str(round(time.time()))
     os.mkdir(timestamp)
-    n_covs = len(expl_vars)
-    epochs = 10
 
     # Info messages can help you when an algorithm crashes. These info
     # messages are stored in a log file which is sent to the server when
@@ -76,7 +76,8 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, organiz
 
         std_cols = (std_cols / global_count) ** 0.5
 
-        kwargs_dict = {'expl_vars': expl_vars, 'mean_cols': average, 'std_cols': std_cols, 'feature_type': feature_type}
+        kwargs_dict = {'expl_vars': expl_vars, 'mean_cols': average, 'std_cols': std_cols,
+                       'feature_type': feature_type, 'split_data': split_data, 'split_ratio': split_ratio}
         method = 'normalize'
         results = subtaskLauncher(client, [method, kwargs_dict, ids])
         return results
@@ -88,7 +89,9 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, organiz
                 'method': 'retrieve_data',
                 'kwargs': {
                     'feature_type': feature_type,
-                    'expl_vars': expl_vars
+                    'expl_vars': expl_vars,
+                    'split_data': split_data,
+                    'split_ratio': split_ratio
                 }
             },
             organization_ids=ids
@@ -111,7 +114,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, organiz
         return outcome
 
 
-def RPC_retrieve_data(data, feature_type, expl_vars):
+def RPC_retrieve_data(data, feature_type, expl_vars, split_data, split_ratio):
     path = '/mnt/data/'
 
     if len(data['endpoint']) != 1:
@@ -156,7 +159,17 @@ def RPC_retrieve_data(data, feature_type, expl_vars):
         for column in columns_to_convert:
             df[column] = df[column].astype(int)
 
-        df.to_csv(path + 'clinical_data.csv', index=False)
+        if split_data:
+            # Split the data if requested
+            train_df, test_df = split_data_consistently(df, split_ratio=split_ratio)
+            train_df.to_csv(path + f'train_{feature_type.lower()}_data.csv', index=False)
+            test_df.to_csv(path + f'test_{feature_type.lower()}_data.csv', index=False)
+            info(f"Data split into train/test sets with ratio {split_ratio}")
+        else:
+            # Save the full dataset
+            df.to_csv(path + 'clinical_data.csv', index=False)
+
+        # df.to_csv(path + 'clinical_data.csv', index=False)
 
     return {'fetch': 'ok'}
 
@@ -196,6 +209,7 @@ def RPC_average_partial(data, expl_vars, feature_type):
         df[feature] = df[feature].astype(float).round(3)
 
     path = '/mnt/data/'
+
     df = df.dropna(axis=0)
 
     if feature_type == "Radiomics":
@@ -212,9 +226,8 @@ def RPC_average_partial(data, expl_vars, feature_type):
         "count": local_count}
 
 
-def RPC_normalize(data, expl_vars, mean_cols, std_cols, feature_type):
+def RPC_normalize(data, expl_vars, mean_cols, std_cols, feature_type, split_data, split_ratio):
     path = '/mnt/data/'
-
     if feature_type == "Radiomics":
         file = path + 'radiomics_raw.csv'
 
@@ -277,6 +290,13 @@ def RPC_normalize(data, expl_vars, mean_cols, std_cols, feature_type):
 
         df.to_csv(path + 'combined_data.csv', index=False)
 
+    if split_data:
+        # Apply train/test split if requested
+        train_df, test_df = split_data_consistently(df, split_ratio=split_ratio)
+        train_df.to_csv(path + f'train_{feature_type.lower()}_data.csv', index=False)
+        test_df.to_csv(path + f'test_{feature_type.lower()}_data.csv', index=False)
+        info(f"Data split into train/test sets with ratio {split_ratio}")
+
     return "Queried data was normalized and saved in mount folder"
 
 
@@ -334,6 +354,55 @@ def extract_data_via_sparql(endpoint, feature_type, expl_vars):
 
     except Exception as _exception:
         info(f'Could not query endpoint {endpoint}, response {_exception}')
+
+
+def split_data_consistently(df, split_ratio, patient_id_col='patientID', random_seed=42):
+    """
+    Split data consistently based on patient IDs.
+
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        The dataframe to split
+    patient_id_col : str
+        Column name containing patient IDs
+    split_ratio : float
+        Ratio for train split (between 0 and 1)
+    random_seed : int
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    train_df : pandas.DataFrame
+        Training dataset
+    test_df : pandas.DataFrame
+        Test dataset
+    """
+    # Get unique patient IDs
+    unique_patients = df[patient_id_col].unique()
+
+    # Set random seed for reproducibility
+    np.random.seed(random_seed)
+
+    # Randomly shuffle patient IDs
+    shuffled_patients = np.random.permutation(unique_patients)
+
+    # Calculate split point
+    split_idx = int(len(shuffled_patients) * split_ratio)
+
+    # Split patient IDs into train and test sets
+    train_patients = shuffled_patients[:split_idx]
+    test_patients = shuffled_patients[split_idx:]
+
+    # Split dataframe based on patient IDs
+    train_df = df[df[patient_id_col].isin(train_patients)].copy()
+    test_df = df[df[patient_id_col].isin(test_patients)].copy()
+
+    # Save the patient splits for reference
+    # pd.Series(train_patients).to_csv('/mnt/data/train_patients.csv', index=False)
+    # pd.Series(test_patients).to_csv('/mnt/data/test_patients.csv', index=False)
+
+    return train_df, test_df
 
 
 def compose_sparql_query(feature_type, expl_vars):

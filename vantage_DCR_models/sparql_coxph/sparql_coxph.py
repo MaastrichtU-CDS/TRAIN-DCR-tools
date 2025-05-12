@@ -8,7 +8,7 @@ import math
 from scipy.linalg import solve
 
 
-def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype, oropharynx, organization_ids=None):
+def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype, oropharynx, split_data, organization_ids=None):
     """Combine partials to global model
     """
     # Info messages can help you when an algorithm crashes. These info
@@ -42,7 +42,8 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
                               ['get_unique_event_times_and_counts',
                                {'time_col': time_col, 'outcome_col': outcome_col,
                                 'feature_type': feature_type, 'expl_vars': expl_vars,
-                                'oropharynx': oropharynx, 'roitype': roitype},
+                                'oropharynx': oropharynx, 'roitype': roitype,
+                                'split_data': split_data},
                                ids])
 
     unique_time_events = []
@@ -59,7 +60,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
     results = subtaskLauncher(client,
                               ['compute_summed_z',
                                {'expl_vars': expl_vars, 'outcome_col': outcome_col, 'feature_type': feature_type,
-                                'oropharynx': oropharynx, 'roitype': roitype},
+                                'oropharynx': oropharynx, 'roitype': roitype, 'split_data': split_data},
                                ids])
 
     z_sum = 0
@@ -73,7 +74,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
     for epoch in range(epochs):
 
         kwargs = {'expl_vars': expl_vars, 'time_col': time_col, 'beta': beta,
-                  'unique_time_events': unique_time_events,
+                  'unique_time_events': unique_time_events, 'split_data': split_data,
                   'feature_type': feature_type, 'oropharynx': oropharynx, 'roitype': roitype}
 
         results = subtaskLauncher(client, ['perform_iteration', kwargs, ids])
@@ -131,38 +132,23 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
     return results
 
 
-def data_selector(data, feature_type, oropharynx, roitype):
-    if feature_type == "Clinical":
-        df = pd.read_csv('/mnt/data/clinical_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        return df
-    elif feature_type == 'Radiomics':
-        df = pd.read_csv('/mnt/data/radiomics_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        if roitype == "Primary":
-            df = df.loc[df['ROI'] == 'Primary']
-        elif roitype == "Node":
-            df = df.loc[df['ROI'] != 'Primary']
-        return df
-    elif feature_type == "Combined":
-        df = pd.read_csv('/mnt/data/combined_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        return df
-    elif feature_type == "LP":
-        df = pd.read_csv('/mnt/data/df_lps.csv')
+def data_selector(data, feature_type, oropharynx, roitype, split_data):
+    if feature_type == "LP":
+        df = pd.read_csv('/mnt/data/df_lp_train.csv')
         return df
     else:
-        print("Choose the right filters")
+        file_path = f'/mnt/data/train_{feature_type.lower()}_data.csv' if split_data else f'/mnt/data/{feature_type.lower()}_data.csv'
+        df = pd.read_csv(file_path)
 
+        df = df[df['tumourlocation'] == 'Oropharynx'] if oropharynx == "yes" else df[
+            df['tumourlocation'] != 'Oropharynx']
+
+        if feature_type == 'Radiomics' or feature_type == 'Combined':
+            if roitype == "Primary":
+                df = df[df['ROI'] == 'Primary']
+            elif roitype == "Node":
+                df = df[df['ROI'] != 'Primary']
+        return df
 
 
 def compute_derivatives(summed_agg1, summed_agg2, summed_agg3, D_all, z_hat):
@@ -191,8 +177,8 @@ def compute_derivatives(summed_agg1, summed_agg2, summed_agg3, D_all, z_hat):
     return primary_derivative, secondary_derivative
 
 
-def RPC_perform_iteration(data, expl_vars, time_col, beta, unique_time_events, feature_type, oropharynx, roitype):
-    df = data_selector(data, feature_type, oropharynx, roitype)
+def RPC_perform_iteration(data, expl_vars, time_col, beta, unique_time_events, feature_type, oropharynx, roitype, split_data):
+    df = data_selector(data, feature_type, oropharynx, roitype, split_data)
     D = len(unique_time_events)
     n_covs = len(expl_vars)
 
@@ -225,13 +211,13 @@ def RPC_perform_iteration(data, expl_vars, time_col, beta, unique_time_events, f
             'agg3': agg3}
 
 
-def RPC_compute_summed_z(data, expl_vars, outcome_col, feature_type, oropharynx, roitype):
-    df = data_selector(data, feature_type, oropharynx, roitype)
+def RPC_compute_summed_z(data, expl_vars, outcome_col, feature_type, oropharynx, roitype, split_data):
+    df = data_selector(data, feature_type, oropharynx, roitype, split_data)
     return {'sum': df[df[outcome_col] == 1][expl_vars].sum()}
 
 
-def RPC_get_unique_event_times_and_counts(data, time_col, outcome_col, feature_type, oropharynx, roitype, expl_vars):
-    df = data_selector(data, feature_type, oropharynx, roitype)
+def RPC_get_unique_event_times_and_counts(data, time_col, outcome_col, feature_type, oropharynx, roitype, expl_vars, split_data):
+    df = data_selector(data, feature_type, oropharynx, roitype, split_data)
     times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
     times = times.sort_values(by=time_col)[[time_col, outcome_col]]
     times['freq'] = times[outcome_col]

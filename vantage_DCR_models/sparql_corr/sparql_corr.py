@@ -16,7 +16,7 @@ codedict = {
     "C12421": "Oral cavity", "C20000": 1, "C30000": 0, "C40000": 1, "C50000": 0}
 
 
-def master(client, data, roitype, expl_vars, outcome_col, oropharynx, feature_type, organization_ids=None):
+def master(client, data, roitype, expl_vars, outcome_col, oropharynx, feature_type, organization_ids=None, split_data=False, split_ratio=0.7):
     """
     Combine partials to global model for the provided predicate and specified organisations
 
@@ -90,16 +90,17 @@ def master(client, data, roitype, expl_vars, outcome_col, oropharynx, feature_ty
 
     std_cols = (std_cols / global_count) ** 0.5
 
-    kwargs_dict = {'expl_vars': expl_vars, 'mean_cols': average, 'std_cols': std_cols}
+    kwargs_dict = {'expl_vars': expl_vars, 'mean_cols': average, 'std_cols': std_cols, 'split_data': split_data,
+                   'split_ratio': split_ratio}
     method = 'normalize'
     results = subtaskLauncher(client, [method, kwargs_dict, ids])
-    print(results)
+    # print(results)
 
     task = client.create_new_task(
         input_={
             'method': 'corr_partial',
             'kwargs': {'expl_vars': expl_vars + [outcome_col], 'average': average,
-                       'roitype': roitype, 'oropharynx': oropharynx}
+                       'roitype': roitype, 'oropharynx': oropharynx, 'split_data': split_data}
         },
         organization_ids=ids
     )
@@ -141,7 +142,7 @@ def master(client, data, roitype, expl_vars, outcome_col, oropharynx, feature_ty
     best_subset, best_value = CFS(corr_fc, corr_ff)
 
     info('save results')
-    print(correlationMatrix)
+    # print(correlationMatrix)
     task = client.create_new_task(
         input_={
             'method': 'save_results',
@@ -252,12 +253,13 @@ def RPC_average_partial(data, expl_vars, feature_type, roitype, oropharynx):
         df['N2orHigher'] = (df['nstage_N2'] | df['nstage_N3']).astype(int)
 
     fold = '/mnt/data/'
+
     df = df.dropna(axis=0)
     df.to_csv(fold + 'corr_data_rad.csv', index=False)
 
     local_sum = df[expl_vars].sum()
     local_count = len(df)
-    print(local_sum, local_count)
+    # print(local_sum, local_count)
     # return the values as a dict
     return {
         "sum": local_sum,
@@ -275,16 +277,27 @@ def RPC_get_std_sums(data, expl_vars, mean_cols):
     return {'std_col_sums': std_col_sums}
 
 
-def RPC_normalize(data, expl_vars, mean_cols, std_cols):
+def RPC_normalize(data, expl_vars, mean_cols, std_cols, split_data, split_ratio):
     fold = '/mnt/data/'
     # nomalize the training set
     file = fold + 'corr_data_rad.csv'
     df = pd.read_csv(file)
     df[expl_vars] = (df[expl_vars] - mean_cols[expl_vars]) / std_cols[expl_vars]
-    df.to_csv(fold + 'norm_corr_data_rad.csv', index=False)
+
+    if split_data:
+        # Apply train/test split if requested
+        train_df, test_df = split_data_consistently(df, split_ratio=split_ratio)
+        train_df.to_csv(fold + 'train_corr_data_rad.csv', index=False)
+        test_df.to_csv(fold + 'test_corr_data_rad.csv', index=False)
+        info(f"Data split into train/test sets with ratio {split_ratio}")
+    else:
+        # Save the full normalized dataset
+        df.to_csv(fold + 'norm_corr_data_rad.csv', index=False)
+
+    return "Data normalized successfully"
 
 
-def RPC_corr_partial(data, expl_vars, average, roitype, oropharynx):
+def RPC_corr_partial(data, expl_vars, average, roitype, oropharynx, split_data):
     """Compute the corr partial
 
     The data argument in this case contains a dataframe with the RDF endpoint of the node.
@@ -292,8 +305,19 @@ def RPC_corr_partial(data, expl_vars, average, roitype, oropharynx):
 
     # extract the endpoint from the dataframe; vantage6 3.7.3  assumes csv as input and reads it as dataframe
     fold = '/mnt/data/'
-    file = fold + 'norm_corr_data_rad.csv'
-    df = pd.read_csv(file)
+    # Use appropriate dataset based on split_data parameter
+    if split_data:
+        file = fold + 'train_corr_data_rad.csv'
+    else:
+        file = fold + 'norm_corr_data_rad.csv'
+
+    try:
+        df = pd.read_csv(file)
+    except FileNotFoundError:
+        info(f"Data file not found: {file}")
+        raise
+
+    info(f"Computing correlations using {'training' if split_data else 'full'} dataset...")
 
     cc = list(product(expl_vars, repeat=2))
     diff = df[expl_vars] - average
@@ -303,7 +327,7 @@ def RPC_corr_partial(data, expl_vars, average, roitype, oropharynx):
     df_prod = pd.concat([diff[c[1]] * diff[c[0]] for c in cc], axis=1, keys=cc)
     diff_sum = df_prod.sum()
 
-    print(diff_sum)
+    # print(diff_sum)
     # return the values as a dict
     return {
         "codeviances": diff_sum
@@ -713,3 +737,51 @@ def compose_sparql_query(roitype, feature_type, oropharynx):
 
     return query
 
+
+def split_data_consistently(df, split_ratio, patient_id_col='subject', random_seed=42):
+    """
+    Split data consistently based on patient IDs.
+
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        The dataframe to split
+    patient_id_col : str
+        Column name containing patient IDs
+    split_ratio : float
+        Ratio for train split (between 0 and 1)
+    random_seed : int
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    train_df : pandas.DataFrame
+        Training dataset
+    test_df : pandas.DataFrame
+        Test dataset
+    """
+    # Get unique patient IDs
+    unique_patients = df[patient_id_col].unique()
+
+    # Set random seed for reproducibility
+    np.random.seed(random_seed)
+
+    # Randomly shuffle patient IDs
+    shuffled_patients = np.random.permutation(unique_patients)
+
+    # Calculate split point
+    split_idx = int(len(shuffled_patients) * split_ratio)
+
+    # Split patient IDs into train and test sets
+    train_patients = shuffled_patients[:split_idx]
+    test_patients = shuffled_patients[split_idx:]
+
+    # Split dataframe based on patient IDs
+    train_df = df[df[patient_id_col].isin(train_patients)].copy()
+    test_df = df[df[patient_id_col].isin(test_patients)].copy()
+
+    # Save the patient splits for reference
+    # pd.Series(train_patients).to_csv('/mnt/data/train_patients.csv', index=False)
+    # pd.Series(test_patients).to_csv('/mnt/data/test_patients.csv', index=False)
+
+    return train_df, test_df

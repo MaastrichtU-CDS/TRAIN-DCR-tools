@@ -10,8 +10,8 @@ import pandas as pd
 from vantage6.tools.util import info
 
 
-def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype, oropharynx, n_lambda=50, lambda_range=None, beta_start=None,
-           epsilon=1 * 10 ^ -8, epochs=200, organization_ids=None):
+def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype, oropharynx, n_lambda=50,
+           lambda_range=None, beta_start=None, epsilon=1 * 10 ^ -8, epochs=200, organization_ids=None, split_data=False):
     """Combine partials to global model
 
     First we collect the parties that participate in the collaboration.
@@ -70,7 +70,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
         tot_patients = np.array(data[f'{roitype}_train_total_patients'])[0, 1]
     else:
         kwargs_dict = {'expl_vars': expl_vars + [outcome_col], 'feature_type': feature_type,
-                       'oropharynx': oropharynx, 'roitype': roitype, 'time_col': time_col}
+                       'oropharynx': oropharynx, 'roitype': roitype, 'time_col': time_col, 'split_data': split_data}
         method = 'average_partial'
         # results = subtaskLauncher(client, [method, kwargs_dict, ids])
 
@@ -110,7 +110,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
     results = subtaskLauncher(client,
                               ['get_unique_event_times_and_counts', {'time_col': time_col, 'outcome_col': outcome_col,
                                                                      'feature_type': feature_type, 'expl_vars': expl_vars,
-                                                                     'oropharynx': oropharynx, 'roitype': roitype},
+                                                                     'oropharynx': oropharynx, 'roitype': roitype, 'split_data': split_data},
                                ids])
 
     unique_time_events = []
@@ -125,7 +125,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
 
     # maximum regularization parameter allowed
     info("Getting maximum regularization parameter")
-    kwargs = {'expl_vars': expl_vars, 'time_col': time_col, 'beta': np.zeros(n_covs),
+    kwargs = {'expl_vars': expl_vars, 'time_col': time_col, 'beta': np.zeros(n_covs), 'split_data': split_data,
               'D_all': D_all, 'feature_type': feature_type, 'oropharynx': oropharynx, 'roitype': roitype}
     results = subtaskLauncher(client, ['compute_exp_eta_sum', kwargs, ids])
 
@@ -140,7 +140,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
     pd.DataFrame([R]).T.reset_index().to_csv('/mnt/data/' + timestamp + "/R.csv")
 
     kwargs = {'expl_vars': expl_vars, 'time_col': time_col, 'outcome_col': outcome_col, 'beta': np.zeros(n_covs),
-              'D_all': D_all, "R": R, 'oropharynx': oropharynx, 'feature_type': feature_type, 'roitype': roitype}
+              'D_all': D_all, "R": R, 'oropharynx': oropharynx, 'feature_type': feature_type, 'roitype': roitype, 'split_data': split_data}
     results = subtaskLauncher(client, ['compute_wxz', kwargs, ids])
 
     wxz = []
@@ -192,7 +192,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
                     print(beta.shape)
 
                     kwargs = {'expl_vars': expl_vars, 'time_col': time_col, 'beta': beta, 'roitype': roitype,
-                              'D_all': D_all, 'oropharynx': oropharynx, 'feature_type': feature_type}
+                              'D_all': D_all, 'oropharynx': oropharynx, 'feature_type': feature_type, 'split_data': split_data}
                     results = subtaskLauncher(client, ['compute_exp_eta_sum', kwargs, ids])
 
                     R = []
@@ -204,7 +204,7 @@ def master(client, data, expl_vars, time_col, outcome_col, feature_type, roitype
                          range(len(D_all))}
 
                     kwargs = {'expl_vars': expl_vars, 'time_col': time_col, 'outcome_col': outcome_col, 'beta': beta,
-                              'D_all': D_all, 'coord': coord, 'coord_index': coord_index, 'R': R,
+                              'D_all': D_all, 'coord': coord, 'coord_index': coord_index, 'R': R, 'split_data': split_data,
                               'oropharynx': oropharynx, 'feature_type': feature_type, 'roitype': roitype}
 
                     results = subtaskLauncher(client, ['compute_update_parts', kwargs, ids])
@@ -261,46 +261,27 @@ def load_data(path):
     return data
 
 
-def data_selector(data, feature_type, oropharynx, roitype, expl_vars):
-    if feature_type == 'Clinical':
-        df = pd.read_csv('/mnt/data/clinical_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
+def data_selector(data, feature_type, oropharynx, roitype, expl_vars, split_data):
+        file_path = f'/mnt/data/train_{feature_type.lower()}_data.csv' if split_data else f'/mnt/data/{feature_type.lower()}_data.csv'
+        df = pd.read_csv(file_path)
+
+        df = df[df['tumourlocation'] == 'Oropharynx'] if oropharynx == "yes" else df[df['tumourlocation'] != 'Oropharynx']
+
+        if feature_type == 'Radiomics' or feature_type == 'Combined':
+            if roitype == "Primary":
+                df = df[df['ROI'] == 'Primary']
+            elif roitype == "Node":
+                df = df[df['ROI'] != 'Primary']
+
         return df
-    elif feature_type == 'Radiomics':
-        df = pd.read_csv('/mnt/data/radiomics_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        if roitype == "Primary":
-            df = df.loc[df['ROI'] == 'Primary']
-        elif roitype == "Node":
-            df = df.loc[df['ROI'] != 'Primary']
-        return df
-    elif feature_type == "Combined":
-        df = pd.read_csv('/mnt/data/combined_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        if roitype == "Primary":
-            df = df.loc[df['ROI'] == 'Primary']
-        elif roitype == "Node":
-            df = df.loc[df['ROI'] != 'Primary']
-        return df
-    else:
-        print("Choose the right filters")
 
 
 def proxL1Norm(x, kappa):
     return np.maximum(0., x - kappa) - np.maximum(0., -x - kappa)
 
 
-def RPC_compute_update_parts(data, expl_vars, time_col, outcome_col, D_all, R, beta, coord, coord_index, feature_type, oropharynx, roitype):
-    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars)
+def RPC_compute_update_parts(data, expl_vars, time_col, outcome_col, D_all, R, beta, coord, coord_index, feature_type, oropharynx, roitype, split_data):
+    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars, split_data)
     #df.drop(df.loc[df[time_col] == 0].index, inplace=True)
     df = df.dropna(axis=0)
     df = calculate_w_z(D_all, R, beta, outcome_col, df, expl_vars, time_col)
@@ -311,8 +292,8 @@ def RPC_compute_update_parts(data, expl_vars, time_col, outcome_col, D_all, R, b
     return {'numeratore': numeratore, 'denominatore': denominatore}
 
 
-def RPC_compute_wxz(data, expl_vars, time_col, outcome_col, beta, D_all, R, feature_type, oropharynx, roitype):
-    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars)
+def RPC_compute_wxz(data, expl_vars, time_col, outcome_col, beta, D_all, R, feature_type, oropharynx, roitype, split_data):
+    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars, split_data)
     #df.drop(df.loc[df[time_col] == 0].index, inplace=True)
     df = df.dropna(axis=0)
     df = calculate_w_z(D_all, R, beta, outcome_col, df, expl_vars, time_col)
@@ -336,8 +317,8 @@ def calculate_w_z(D_all, R, beta, outcome_col, df, expl_vars, time_col):
     return df
 
 
-def RPC_compute_exp_eta_sum(data, expl_vars, time_col, beta, D_all, feature_type, oropharynx, roitype):
-    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars)
+def RPC_compute_exp_eta_sum(data, expl_vars, time_col, beta, D_all, feature_type, oropharynx, roitype, split_data):
+    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars, split_data)
     #df.drop(df.loc[df[time_col] == 0].index, inplace=True)
     df = df.dropna(axis=0)
     R = {D_all.iloc[i][time_col]: sum(np.exp(np.dot(df[df[time_col] >= D_all.iloc[i][time_col]][expl_vars], beta))) for
@@ -345,8 +326,8 @@ def RPC_compute_exp_eta_sum(data, expl_vars, time_col, beta, D_all, feature_type
     return {"R": R}
 
 
-def RPC_get_unique_event_times_and_counts(data, expl_vars, time_col, outcome_col, feature_type, oropharynx, roitype):
-    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars)
+def RPC_get_unique_event_times_and_counts(data, expl_vars, time_col, outcome_col, feature_type, oropharynx, roitype, split_data):
+    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars, split_data)
     #df.drop(df.loc[df[time_col] == 0].index, inplace=True)
     df = df.dropna(axis=0)
     times = df[df[outcome_col] == 1].groupby(time_col, as_index=False).count()
@@ -355,13 +336,13 @@ def RPC_get_unique_event_times_and_counts(data, expl_vars, time_col, outcome_col
     times = times.drop(columns=outcome_col)
     return {'times': times}
 
-def RPC_average_partial(data, expl_vars, feature_type, oropharynx, roitype, time_col):
+def RPC_average_partial(data, expl_vars, feature_type, oropharynx, roitype, time_col, split_data):
     """Compute the average partial
 
     The data argument contains a pandas-dataframe containing the local
     data from the node.
     """
-    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars)
+    df = data_selector(data, feature_type, oropharynx, roitype, expl_vars, split_data)
     #df.drop(df.loc[df[time_col] == 0].index, inplace=True)
     df = df.dropna(axis=0)
     # compute sum and N.

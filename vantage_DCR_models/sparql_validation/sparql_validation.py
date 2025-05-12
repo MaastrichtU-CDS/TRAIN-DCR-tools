@@ -1,14 +1,14 @@
 import time
 import math
 import numpy
+import numpy as np
 import pandas as pd
-from sksurv.metrics import concordance_index_censored
+from sksurv.metrics import concordance_index_censored, cumulative_dynamic_auc
 
 from vantage6.tools.util import info
 
-
-def master(client, data, feature_type, oropharynx, roitype, organization_ids=None,
-           coefficients=None, time_col=None, outcome_col=None):
+def master(client, data, feature_type, oropharynx, roitype, split_data, train_data,
+           organization_ids=None, coefficients=None, time_col=None, outcome_col=None):
     """Combine partials to global model
 
     First we collect the parties that participate in the collaboration.
@@ -67,7 +67,9 @@ def master(client, data, feature_type, oropharynx, roitype, organization_ids=Non
                 'outcome_col': outcome_col,
                 'feature_type': feature_type,
                 'oropharynx': oropharynx,
-                'roitype': roitype
+                'roitype': roitype,
+                'split_data': split_data,
+                'train_data': train_data
             }
         },
         organization_ids=ids
@@ -97,61 +99,113 @@ def master(client, data, feature_type, oropharynx, roitype, organization_ids=Non
     return cindex
 
 
-# gets the dataset from the mentioned path in the node based on the value passed for 'data' arg
-def data_selector(data, feature_type, oropharynx, roitype):
-    if feature_type == "Clinical":
-        df = pd.read_csv('/mnt/data/clinical_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        return df
-    elif feature_type == "Radiomics":
-        df = pd.read_csv('/mnt/data/radiomics_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        if roitype == "Primary":
-            df = df.loc[df['ROI'] == 'Primary']
-        elif roitype == "Node":
-            df = df.loc[df['ROI'] != 'Primary']
-        return df
-    elif feature_type == "Combined":
-        df = pd.read_csv('/mnt/data/combined_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        return df
-    elif feature_type == "LP":
-        df = pd.read_csv('/mnt/data/df_lps.csv')
-        return df
+def data_selector(data, feature_type, oropharynx, roitype, split_data, train_data):
+    # Handle LP feature type separately
+    if feature_type == "LP":
+        prefix = 'train' if train_data else 'test'
+        return pd.read_csv(f'/mnt/data/df_lp_{prefix}.csv')
+
+    # Determine file path based on feature type and data split
+    if split_data:
+        prefix = 'train' if train_data else 'test'
+        file_path = f'/mnt/data/{prefix}_{feature_type.lower()}_data.csv'
     else:
-        print("Choose the right filters")
+        file_path = f'/mnt/data/{feature_type.lower()}_data.csv'
+
+    info(f"Reading data from {file_path}")
+    # Read the CSV file
+    df = pd.read_csv(file_path)
+
+    # Filter by tumour location
+    df = df[df['tumourlocation'] == 'Oropharynx'] if oropharynx == "yes" else df[
+        df['tumourlocation'] != 'Oropharynx']
+
+    # Filter by ROI type for Radiomics or Combined feature types
+    if feature_type in ['Radiomics', 'Combined']:
+        if roitype == "Primary":
+            df = df[df['ROI'] == 'Primary']
+        elif roitype == "Node":
+            df = df[df['ROI'] != 'Primary']
+
+    return df
 
 
-def RPC_validate_partial(data, feature_type, oropharynx, roitype, coefficients, time_col, outcome_col):
-    """Compute the average partial
+# Function to calculate bootstrap confidence intervals
+def bootstrap_ci(data, feature_type, oropharynx, roitype, coefficients, time_col, outcome_col, split_data,
+                 train_data, num_bootstrap=1000, ci=0.95):
+    """Calculate bootstrap confidence intervals for cindex."""
+    info("Calculating bootstrap confidence intervals")
 
-    The data argument contains a pandas-dataframe containing the local
-    data from the node.
-    """
+    # Fetch the normalized dataset
+    df = data_selector(data, feature_type, oropharynx, roitype, split_data, train_data)
+    df["lp"] = ""
+    lp_list = []
 
+    # Extract beta coefficients
+    betas = coefficients[0]
+
+    # Calculate linear predictor (lp)
+    for i, j in df.iterrows():
+        val_dict = {key: j[key] for key in betas}
+        lp_val = {key: (val_dict[key] * betas[key]) for key in betas}
+        lp = sum(lp_val.values())
+        exp_lp = math.exp(lp)
+        lp_list.append(exp_lp)
+    df['lp'] = lp_list
+
+    # Ensure outcome_col is boolean
+    df[outcome_col] = df[outcome_col].astype('bool')
+
+    # Perform bootstrap resampling
+    cindex_bootstrap = []
+    n = len(df)
+    valid_bootstraps = 0
+    attempts = 0
+    max_attempts = num_bootstrap * 2  # Allow more tries in case of skips
+
+    while valid_bootstraps < num_bootstrap and attempts < max_attempts:
+        sample_df = df.sample(n=n, replace=True)
+        if sample_df[outcome_col].sum() == 0:
+            attempts += 1
+            continue  # skip all-censored bootstrap
+        try:
+            result = concordance_index_censored(
+                sample_df[outcome_col],
+                sample_df[time_col],
+                sample_df["lp"]
+            )
+            cindex_bootstrap.append(result[0])
+            valid_bootstraps += 1
+        except Exception as e:
+            info(f"Bootstrap sample failed: {e}")
+        attempts += 1
+
+    if len(cindex_bootstrap) == 0:
+        info("Warning: All bootstrap samples were invalid. Returning None CI.")
+        return {"lower_ci": None, "upper_ci": None}
+
+    # Calculate confidence intervals
+    lower_bound = np.percentile(cindex_bootstrap, ((1 - ci) / 2) * 100)
+    upper_bound = np.percentile(cindex_bootstrap, (1 - (1 - ci) / 2) * 100)
+
+    return {"lower_ci": lower_bound, "upper_ci": upper_bound}
+
+
+def RPC_validate_partial(data, feature_type, oropharynx, roitype, coefficients, time_col, outcome_col, split_data, train_data):
+    """Compute the average partial with confidence intervals."""
     info(f'Extracting concordance index')
-    # ditching the data argument and fetch the normalized dataset from the node
-    df = data_selector(data, feature_type, oropharynx, roitype)
+
+    # Fetch the normalized dataset
+    df = data_selector(data, feature_type, oropharynx, roitype, split_data, train_data)
     df["lp"] = ""
     lp_list = []
     val_dict = {}
     lp_val = {}
 
-    # extract the beta values from args.
+    # Extract the beta coefficients
     betas = coefficients[0]
-    # print(betas)
 
-    # calculate linear predictor
-    lp = 0
+    # Calculate linear predictor
     for i, j in df.iterrows():
         for key in betas:
             val_dict[key] = j[key]
@@ -161,10 +215,23 @@ def RPC_validate_partial(data, feature_type, oropharynx, roitype, coefficients, 
         lp_list.append(exp_lp)
 
     df['lp'] = lp_list
-    # calculate concordance index
-    df[outcome_col] = df[outcome_col].astype('bool')
-    result = concordance_index_censored(df[outcome_col], df[time_col], df["lp"])
-    #cindex = result[0]
 
-    # return the values as a dict
-    return {"cindex": result}
+    # Calculate concordance index
+    df[outcome_col] = df[outcome_col].astype('bool')
+    # ❗ Check for all-censored case (i.e., no events)
+    if df[outcome_col].sum() == 0:
+        info("All samples are censored — skipping validation for this center.")
+        return None
+
+    try:
+        result = concordance_index_censored(df[outcome_col], df[time_col], df["lp"])
+        cindex = result[0]
+    except Exception as e:
+        info(f"Failed to compute concordance index: {e}")
+        return None
+
+    # Calculate bootstrap confidence intervals
+    ci_result = bootstrap_ci(data, feature_type, oropharynx, roitype, coefficients, time_col, outcome_col, split_data, train_data)
+
+    # Return the cindex and confidence intervals
+    return {"cindex": cindex, "confidence_intervals": ci_result}

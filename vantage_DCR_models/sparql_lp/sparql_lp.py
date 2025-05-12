@@ -5,7 +5,7 @@ import pandas as pd
 from vantage6.tools.util import info
 
 
-def master(client, data, oropharynx, organization_ids=None,
+def master(client, data, oropharynx, split_data, train_data, organization_ids=None,
            coefficients=None, time_col=None, outcome_col=None):
     """Combine partials to global model
 
@@ -15,6 +15,8 @@ def master(client, data, oropharynx, organization_ids=None,
     ready. Finally, when the results are ready, we combine them to a
     global average.
 
+
+    # check if the time column ids are received as a string
     Note that the master method also receives the (local) data of the
     node. In most use cases this data argument is not used.
 
@@ -54,6 +56,7 @@ def master(client, data, oropharynx, organization_ids=None,
     # Request all participating parties to compute their partial. This
     # will create a new task at the central server for them to pick up.
     # We've used a kwarg but is also possible to use `args`. Although
+
     # we prefer kwargs as it is clearer.
     info('Requesting partial computation')
     task = client.create_new_task(
@@ -63,8 +66,11 @@ def master(client, data, oropharynx, organization_ids=None,
                 'coefficients': coefficients,
                 'time_col': time_col,
                 'outcome_col': outcome_col,
-                'oropharynx': oropharynx
+                'oropharynx': oropharynx,
+                'split_data': split_data,
+                'train_data':train_data
             }
+        # extract the beta values from args.
         },
         organization_ids=ids
     )
@@ -82,44 +88,38 @@ def master(client, data, oropharynx, organization_ids=None,
         time.sleep(1)
 
     # Once we now the partials are complete, we can collect them.
+
     info("Obtaining results")
     results = client.get_results(task_id=task.get("id"))
 
     # this algo only calculates c-index for one node, so only getting the first result
     return results
 
-# gets the dataset from the mentioned path in the node based on the value passed for 'data' arg
-def data_selector(data, feature_type, oropharynx, roitype):
-    if feature_type == 'Clinical':
-        df = pd.read_csv('/mnt/data/clinical_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        return df
-    elif feature_type == 'Radiomics':
-        df = pd.read_csv('/mnt/data/radiomics_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        if roitype == "Primary":
-            df = df.loc[df['ROI'] == 'Primary']
-        elif roitype == "Node":
-            df = df.loc[df['ROI'] != 'Primary']
-        return df
-    elif feature_type == "Combined":
-        df = pd.read_csv('/mnt/data/combined_data.csv')
-        if oropharynx == "yes":
-            df = df.loc[df['tumourlocation'] == 'Oropharynx']
-        else:
-            df = df.loc[df['tumourlocation'] != 'Oropharynx']
-        return df
+
+def data_selector(data, feature_type, oropharynx, roitype, split_data, train_data):
+    # Determine file path based on feature type and data split
+    if split_data:
+        prefix = 'train' if train_data else 'test'
+        file_path = f'/mnt/data/{prefix}_{feature_type.lower()}_data.csv'
     else:
-        print("Choose the right filters")
+        file_path = f'/mnt/data/{feature_type.lower()}_data.csv'
+
+    # Append the new DataFrame to the existing DataFrame
+    df = pd.read_csv(file_path)
+
+    df = df[df['tumourlocation'] == 'Oropharynx'] if oropharynx == "yes" else df[
+        df['tumourlocation'] != 'Oropharynx']
+
+    if feature_type == 'Radiomics' or feature_type == 'Combined':
+        if roitype == "Primary":
+            df = df[df['ROI'] == 'Primary']
+        elif roitype == "Node":
+            df = df[df['ROI'] != 'Primary']
+
+    return df
 
 
-def RPC_validate_partial(data, oropharynx, coefficients, time_col, outcome_col):
+def RPC_validate_partial(data, oropharynx, coefficients, time_col, outcome_col, split_data, train_data):
     """Compute the average partial
 
     The data argument contains a pandas-dataframe containing the local
@@ -131,7 +131,7 @@ def RPC_validate_partial(data, oropharynx, coefficients, time_col, outcome_col):
     # ditching the data argument and fetch the normalized dataset from the node
     for key, value in coefficients.items():
         feature_type, roitype = key.split('_')
-        df = data_selector(data, feature_type, oropharynx, roitype)
+        df = data_selector(data, feature_type, oropharynx, roitype, split_data, train_data)
         # extract the beta values from args.
         betas = value
         column_keys = list(betas.keys())
@@ -159,18 +159,15 @@ def RPC_validate_partial(data, oropharynx, coefficients, time_col, outcome_col):
 
         if 'Clinical' in feature_type:
             # Create a new lp CSV file
-            columns_to_keep = ['patientID', column_name, time_col, outcome_col]  # replace with your column names
-            df_to_append = df[columns_to_keep]
-            df_to_append.to_csv(file_path + 'df_lps.csv', index=False)
+            df_to_append = df[['patientID', column_name, time_col, outcome_col]]
+            file_suffix = 'train' if train_data else 'test'
+            df_to_append.to_csv(f'{file_path}df_lp_{file_suffix}.csv', index=False)
         else:
             # Append the existing DataFrame with the new lps
-            df_existing = pd.read_csv(file_path + 'df_lps.csv')
-            columns_to_keep = ['patientID', column_name]  # replace with your column names
-            df_to_append = df[columns_to_keep]
-            # Append the new DataFrame to the existing DataFrame
+            file_suffix = 'train' if train_data else 'test'
+            df_existing = pd.read_csv(f'{file_path}df_lp_{file_suffix}.csv')
+            df_to_append = df[['patientID', column_name]]
             df_updated = df_existing.merge(df_to_append, on='patientID', how='inner')
-            # Save the updated DataFrame back to the CSV file
-            df_updated.to_csv(file_path + 'df_lps.csv', index=False)
+            df_updated.to_csv(f'{file_path}df_lp_{file_suffix}.csv', index=False)
 
     return {'lp save': 'ok'}
-
